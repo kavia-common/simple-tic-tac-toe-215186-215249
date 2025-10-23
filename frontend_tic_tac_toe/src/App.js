@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './App.css';
+import { calculateWinner, isDraw, initBoard, validateMove } from './utils/gameLogic';
+import { getAIMove } from './utils/ai';
 
 /**
 // ============================================================================
@@ -153,61 +155,7 @@ function Status({ winner, isDraw, xIsNext }) {
   );
 }
 
-// PUBLIC_INTERFACE
-export function initBoard() {
-  /** Returns a new empty 3x3 board as array of 9 nulls. */
-  return Array(9).fill(null);
-}
 
-// PUBLIC_INTERFACE
-export function validateMove(board, index) {
-  /**
-   * Validate move.
-   * Parameters:
-   * - board: (Array) 9-length array with 'X' | 'O' | null
-   * - index: (number) 0..8
-   * Returns:
-   * - { valid: boolean, reason?: string }
-   */
-  if (!Array.isArray(board) || board.length !== 9) {
-    return { valid: false, reason: 'Invalid board' };
-    }
-  if (typeof index !== 'number' || index < 0 || index > 8) {
-    return { valid: false, reason: 'Invalid index' };
-  }
-  if (board[index] !== null) {
-    return { valid: false, reason: 'Cell occupied' };
-  }
-  return { valid: true };
-}
-
-// PUBLIC_INTERFACE
-export function calculateWinner(board) {
-  /**
-   * Check winner on a 3x3 board.
-   * Returns:
-   * - 'X' | 'O' | null
-   */
-  const lines = [
-    [0,1,2],[3,4,5],[6,7,8], // rows
-    [0,3,6],[1,4,7],[2,5,8], // cols
-    [0,4,8],[2,4,6],         // diagonals
-  ];
-  for (const [a,b,c] of lines) {
-    if (board[a] && board[a] === board[b] && board[b] === board[c]) {
-      return board[a];
-    }
-  }
-  return null;
-}
-
-// PUBLIC_INTERFACE
-export function isDraw(board) {
-  /**
-   * True if no empty cells and no winner.
-   */
-  return !calculateWinner(board) && board.every((c) => c !== null);
-}
 
 /**
  * Main App: Tic Tac Toe Game
@@ -216,6 +164,12 @@ function App() {
   const [board, setBoard] = useState(() => initBoard());
   const [xIsNext, setXIsNext] = useState(true);
   const [theme, setTheme] = useState('light');
+
+  // AI integration states
+  const [mode, setMode] = useState('human-ai'); // 'human-ai' | 'human-human'
+  const [difficulty, setDifficulty] = useState('random'); // 'random' | 'optimal'
+  const [isAITurn, setIsAITurn] = useState(false);
+  const [aiDelayMs] = useState(300);
 
   const winner = useMemo(() => calculateWinner(board), [board]);
   const draw = useMemo(() => isDraw(board), [board]);
@@ -246,6 +200,10 @@ function App() {
      * Audit: { action: 'MOVE_ATTEMPT'|'MOVE_APPLY'|'MOVE_REJECT', player, index, before, after }
      */
     try {
+      if (isAITurn) {
+        auditLog.info('MOVE_REJECT', { reason: 'AI turn', player: currentPlayer, index });
+        return;
+      }
       const validation = validateMove(board, index);
       auditLog.info('MOVE_ATTEMPT', { player: currentPlayer, index, before: board });
 
@@ -264,6 +222,11 @@ function App() {
       setXIsNext((prev) => !prev);
       auditLog.info('MOVE_APPLY', { player: currentPlayer, index, after: next });
 
+      // If in Human vs AI mode, schedule AI turn when O is AI (human always X)
+      if (mode === 'human-ai') {
+        // human is X, AI is O by design
+        setIsAITurn(true);
+      }
     } catch (err) {
       auditLog.error('MOVE_ERROR', { message: err?.message });
     }
@@ -275,6 +238,7 @@ function App() {
     auditLog.info('GAME_RESTART', { before: board });
     setBoard(initBoard());
     setXIsNext(true);
+    setIsAITurn(false);
   };
 
   // PUBLIC_INTERFACE
@@ -290,6 +254,48 @@ function App() {
       auditLog.info('GAME_DRAW', { finalBoard: board });
     }
   }, [winner, draw, board]);
+
+  // Trigger AI move when needed
+  useEffect(() => {
+    if (mode !== 'human-ai') return;
+    if (winner || draw) {
+      setIsAITurn(false);
+      return;
+    }
+    // Human is X; AI is O; AI plays when it's O's turn
+    const aiMark = 'O';
+    const currentMark = xIsNext ? 'X' : 'O';
+    if (currentMark !== aiMark) return;
+    if (!isAITurn) return;
+
+    const before = board.slice();
+    const timer = setTimeout(() => {
+      try {
+        const idx = getAIMove(board, aiMark, difficulty);
+        const validation = validateMove(board, idx);
+        if (!validation.valid) {
+          auditLog.error('AI_MOVE_INVALID', { idx, reason: validation.reason, before });
+          setIsAITurn(false);
+          return;
+        }
+        if (calculateWinner(board) || isDraw(board)) {
+          setIsAITurn(false);
+          return;
+        }
+        const next = board.slice();
+        next[idx] = aiMark;
+        auditLog.info('AI_MOVE', { ts: new Date().toISOString(), aiMark, difficulty, index: idx, before, after: next });
+        setBoard(next);
+        setXIsNext(true); // after O moves, X's turn
+      } catch (err) {
+        auditLog.error('AI_MOVE_ERROR', { message: err?.message, before });
+      } finally {
+        setIsAITurn(false);
+      }
+    }, aiDelayMs);
+
+    return () => clearTimeout(timer);
+  }, [board, xIsNext, isAITurn, mode, difficulty, winner, draw]);
 
   return (
     <div className="App">
@@ -307,11 +313,56 @@ function App() {
       <main className="ttt-container">
         <div className="ttt-card">
           <Status winner={winner} isDraw={draw} xIsNext={xIsNext} />
-          <Board board={board} onSquareClick={handleSquareClick} gameOver={gameOver} />
-          <div className="ttt-controls">
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', justifyContent: 'center' }}>
+            <label style={{ fontSize: 14, color: themeTokens.text }}>
+              Mode:
+              <select
+                aria-label="Game mode selector"
+                value={mode}
+                onChange={(e) => {
+                  const nextMode = e.target.value;
+                  setMode(nextMode);
+                  // Reset AI state if switching modes
+                  setIsAITurn(false);
+                }}
+                style={{ marginLeft: 8, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+              >
+                <option value="human-ai">Human vs AI</option>
+                <option value="human-human">Human vs Human</option>
+              </select>
+            </label>
+            <label style={{ fontSize: 14, color: themeTokens.text, opacity: mode === 'human-ai' ? 1 : 0.6 }}>
+              Difficulty:
+              <select
+                aria-label="AI difficulty selector"
+                value={difficulty}
+                onChange={(e) => setDifficulty(e.target.value)}
+                disabled={mode !== 'human-ai'}
+                style={{ marginLeft: 8, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+              >
+                <option value="random">Random</option>
+                <option value="optimal">Optimal</option>
+              </select>
+            </label>
+          </div>
+          <Board board={board} onSquareClick={handleSquareClick} gameOver={gameOver || isAITurn} />
+          <div className="ttt-controls" style={{ gap: 8, flexWrap: 'wrap' }}>
             <button className="ttt-btn" onClick={handleRestart} aria-label="Restart game">
               Restart
             </button>
+            {mode === 'human-ai' && (
+              <button
+                className="ttt-btn"
+                aria-label="Force AI move"
+                onClick={() => {
+                  if (!gameOver && !isAITurn && !xIsNext) setIsAITurn(true);
+                }}
+                disabled={gameOver || isAITurn || xIsNext}
+                style={{ background: '#06b6d4' }}
+              >
+                AI Move
+              </button>
+            )}
           </div>
         </div>
       </main>

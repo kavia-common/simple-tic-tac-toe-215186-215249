@@ -1,5 +1,8 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import App, { calculateWinner, initBoard, isDraw, validateMove } from './App';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import App from './App';
+import { calculateWinner, initBoard, isDraw, validateMove } from './utils/gameLogic';
+
+jest.useFakeTimers();
 
 describe('Core Logic (unit tests)', () => {
   test('initBoard returns 9 nulls', () => {
@@ -40,11 +43,13 @@ describe('Core Logic (unit tests)', () => {
   });
 });
 
-describe('App UI (smoke tests)', () => {
+describe('App UI (smoke tests + AI)', () => {
   test('renders title and controls', () => {
     render(<App />);
     expect(screen.getByText(/Tic Tac Toe/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Restart/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Game mode selector/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/AI difficulty selector/i)).toBeInTheDocument();
   });
 
   test('plays a simple move and prevents overwrite', () => {
@@ -59,5 +64,41 @@ describe('App UI (smoke tests)', () => {
     // Attempt overwrite should not change
     fireEvent.click(cells[0]);
     expect(cells[0]).toHaveTextContent('X');
+  });
+
+  test('AI responds after human move in Human vs AI mode', () => {
+    render(<App />);
+    const cells = screen.getAllByRole('button', { name: /Cell/i });
+    // Human (X) moves
+    fireEvent.click(cells[0]);
+    expect(cells[0]).toHaveTextContent('X');
+
+    // After delay, AI (O) should move somewhere
+    act(() => {
+      jest.advanceTimersByTime(400);
+    });
+    const oCount = cells.filter((c) => c.textContent === 'O').length;
+    expect(oCount).toBe(1);
+  });
+
+  test('Disabling clicks during AI turn', () => {
+    render(<App />);
+    const cells = screen.getAllByRole('button', { name: /Cell/i });
+
+    // Human clicks, triggers AI turn
+    fireEvent.click(cells[0]);
+    // Immediately attempt another click on empty cell during AI turn; should not place X
+    fireEvent.click(cells[1]);
+
+    // Fast-forward AI
+    act(() => {
+      jest.advanceTimersByTime(400);
+    });
+
+    // Ensure that there is exactly one X and one O after AI turn
+    const xCount = cells.filter((c) => c.textContent === 'X').length;
+    const oCount = cells.filter((c) => c.textContent === 'O').length;
+    expect(xCount).toBe(1);
+    expect(oCount).toBe(1);
   });
 });
